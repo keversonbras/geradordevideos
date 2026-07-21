@@ -14,24 +14,33 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
 const MODELO_GEMINI = "gemini-flash-latest";
-const MODELO_FISH = "s2.1-pro"; // trocado de "s1" — mesmo preço, modelo topo de linha
+const MODELO_FISH = "s2.1-pro";
 const FONTE_HEADLINE = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
 
-// ---------- Dicionário de correção de pronúncia ----------
-// O Fish Audio não suporta SSML/fonemas, então a correção é reescrever a palavra
-// de um jeito que force a pronúncia certa em português. Vá expandindo esta lista
-// conforme surgirem novas palavras problemáticas em produtos futuros.
-const DICIONARIO_PRONUNCIA = {
-  "shopee": "chopí",
-  "escova": "escóva", // força o acento na sílaba certa (es-CÓ-va)
-};
+// ---------- Dicionário de correção de pronúncia (agora vem do Supabase) ----------
 
-function corrigirPronuncia(texto) {
+async function buscarDicionarioPronuncia() {
+  const { data, error } = await supabase
+    .from("pronuncia_correcoes")
+    .select("palavra_errada, palavra_corrigida");
+
+  if (error) {
+    console.error("Erro ao buscar dicionário de pronúncia:", error.message);
+    return {};
+  }
+
+  const dicionario = {};
+  for (const linha of data) {
+    dicionario[linha.palavra_errada.toLowerCase()] = linha.palavra_corrigida;
+  }
+  return dicionario;
+}
+
+function corrigirPronuncia(texto, dicionario) {
   let corrigido = texto;
-  for (const [errada, certa] of Object.entries(DICIONARIO_PRONUNCIA)) {
+  for (const [errada, certa] of Object.entries(dicionario)) {
     const regex = new RegExp(`\\b${errada}\\b`, "gi");
     corrigido = corrigido.replace(regex, (match) => {
-      // preserva a capitalização original (maiúscula no início, etc.)
       if (match[0] === match[0].toUpperCase()) {
         return certa.charAt(0).toUpperCase() + certa.slice(1);
       }
@@ -134,8 +143,8 @@ REGRAS PARA AS CENAS:
 
 // ---------- Etapa 2: Fish Audio gera a narração de cada cena ----------
 
-async function gerarAudioCena(texto, voiceId, outPath) {
-  const textoCorrigido = corrigirPronuncia(texto);
+async function gerarAudioCena(texto, voiceId, outPath, dicionario) {
+  const textoCorrigido = corrigirPronuncia(texto, dicionario);
   const resp = await fetch("https://api.fish.audio/v1/tts", {
     method: "POST",
     headers: { Authorization: `Bearer ${FISH_API_KEY}`, "Content-Type": "application/json" },
@@ -164,7 +173,6 @@ function montarVideoFinal({ videoPath, watermarkPath, audiosPaths, cenas, headli
 
   const fontsizeHeadline = 34;
   const larguraVideoPx = larguraVideo(videoPath);
-  // Fator aumentado — o negrito (DejaVuSans-Bold) ocupa mais espaço do que a estimativa anterior previa
   const FATOR_LARGURA_CHAR = 0.66;
   const maxChars = Math.floor((larguraVideoPx * 0.85) / (fontsizeHeadline * FATOR_LARGURA_CHAR));
   const linhas = quebrarTextoPorLargura(paraSentenceCase(headline), maxChars);
@@ -204,6 +212,7 @@ async function processarJob(job) {
     console.log(`Processando job ${job.id}...`);
 
     const { data: preset } = await supabase.from("brand_presets").select("*").eq("id", job.preset_id).single();
+    const dicionarioPronuncia = await buscarDicionarioPronuncia();
 
     const videoPath = path.join(tmpDir, "original.mp4");
     const { data: videoBlob } = await supabase.storage.from("videos-originais").download(job.video_original_path);
@@ -220,7 +229,7 @@ async function processarJob(job) {
     const audiosPaths = [];
     for (let i = 0; i < geminiJson.cenas.length; i++) {
       const p = path.join(tmpDir, `cena_${i}.mp3`);
-      await gerarAudioCena(geminiJson.cenas[i].narracao, preset.voice_id, p);
+      await gerarAudioCena(geminiJson.cenas[i].narracao, preset.voice_id, p, dicionarioPronuncia);
       audiosPaths.push(p);
     }
     await supabase.from("video_jobs").update({ status: "rendering" }).eq("id", job.id);
