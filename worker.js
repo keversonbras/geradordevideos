@@ -126,7 +126,7 @@ REGRAS PARA A HEADLINE — siga rigorosamente este estilo (curiosidade, benefíc
 NÃO use headlines genéricas do tipo "Limpe tudo sem esforço com essa escova" — prefira sempre o ângulo de curiosidade/benefício acima.
 
 REGRAS PARA AS NARRAÇÕES DAS CENAS:
-- A narração será reproduzida a 1.1x de velocidade (10% mais rápido que o normal). Por isso, calibre cada narração de cena para caber em (fim_seg - inicio_seg) segundos usando uma cadência de aproximadamente 2,75 palavras por segundo (já considerando essa velocidade), não 2,5.
+- Calibre cada narração de cena para caber em (fim_seg - inicio_seg) segundos usando uma cadência de aproximadamente 2,5 palavras por segundo (ritmo de fala normal — NÃO reduza o texto pensando em velocidade de reprodução, isso é tratado em outra etapa do sistema).
 - Identifique os cortes de cena reais (mudança de plano/ângulo) e use timestamps em segundos.
 - A ÚLTIMA cena deve terminar EXATAMENTE com: Comente "CTA_KEYWORD" que eu te envio o link! — usando o valor de cta_keyword, sempre com ponto de exclamação no final.
 `.trim();
