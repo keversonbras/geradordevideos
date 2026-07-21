@@ -15,9 +15,10 @@ const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
 const MODELO_GEMINI = "gemini-flash-latest";
 const MODELO_FISH = "s2.1-pro";
+const VELOCIDADE_VOZ = 1.1; // prosody.speed do Fish Audio
 const FONTE_HEADLINE = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
 
-// ---------- Dicionário de correção de pronúncia (agora vem do Supabase) ----------
+// ---------- Dicionário de correção de pronúncia (vem do Supabase) ----------
 
 async function buscarDicionarioPronuncia() {
   const { data, error } = await supabase
@@ -113,21 +114,21 @@ Responda APENAS com um JSON válido, sem markdown, no formato exato abaixo:
   "headline": "chamada curta e IMPACTANTE para sobrepor no vídeo (máx 10 palavras)",
   "cta_keyword": "uma única palavra ou expressão bem curta relacionada ao produto, simples de digitar em um comentário",
   "cenas": [
-    { "inicio_seg": 0, "fim_seg": 4.5, "narracao": "texto de narração SÓ para esse trecho, calibrado para caber em (fim_seg - inicio_seg) segundos, ~2,5 palavras/segundo" }
+    { "inicio_seg": 0, "fim_seg": 4.5, "narracao": "texto de narração SÓ para esse trecho" }
   ]
 }
 
-REGRAS PARA A HEADLINE — siga rigorosamente este estilo (curiosidade, benefício direto, um pouco de humor/exagero, às vezes com um parêntese de reforço no final):
-- "A máquina que limpa sozinha (e ainda te poupa a coluna)"
+REGRAS PARA A HEADLINE — siga rigorosamente este estilo (curiosidade, benefício direto, um pouco de humor/exagero). Varie a estrutura da frase a cada vídeo, não repita sempre o mesmo formato:
 - "Essa sapateira é a cara da riqueza com preço de Shopee"
 - "Barbeador que deixa pele de neném"
 - "O spray que recupera farol amarelado"
 - "Adeus sofrimento para tirar cravos"
 NÃO use headlines genéricas do tipo "Limpe tudo sem esforço com essa escova" — prefira sempre o ângulo de curiosidade/benefício acima.
 
-REGRAS PARA AS CENAS:
+REGRAS PARA AS NARRAÇÕES DAS CENAS:
+- A narração será reproduzida a 1.1x de velocidade (10% mais rápido que o normal). Por isso, calibre cada narração de cena para caber em (fim_seg - inicio_seg) segundos usando uma cadência de aproximadamente 2,75 palavras por segundo (já considerando essa velocidade), não 2,5.
 - Identifique os cortes de cena reais (mudança de plano/ângulo) e use timestamps em segundos.
-- A ÚLTIMA cena deve terminar EXATAMENTE com: Comente "CTA_KEYWORD" que eu te envio o link — usando o valor de cta_keyword.
+- A ÚLTIMA cena deve terminar EXATAMENTE com: Comente "CTA_KEYWORD" que eu te envio o link! — usando o valor de cta_keyword, sempre com ponto de exclamação no final.
 `.trim();
 
   const response = await ai.models.generateContent({
@@ -148,7 +149,13 @@ async function gerarAudioCena(texto, voiceId, outPath, dicionario) {
   const resp = await fetch("https://api.fish.audio/v1/tts", {
     method: "POST",
     headers: { Authorization: `Bearer ${FISH_API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ text: textoCorrigido, reference_id: voiceId, format: "mp3", model: MODELO_FISH }),
+    body: JSON.stringify({
+      text: textoCorrigido,
+      reference_id: voiceId,
+      format: "mp3",
+      model: MODELO_FISH,
+      prosody: { speed: VELOCIDADE_VOZ, volume: 0 },
+    }),
   });
   if (!resp.ok) throw new Error(`Fish Audio falhou: ${await resp.text()}`);
   fs.writeFileSync(outPath, Buffer.from(await resp.arrayBuffer()));
