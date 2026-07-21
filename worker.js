@@ -14,7 +14,32 @@ const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
 const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
 const MODELO_GEMINI = "gemini-flash-latest";
+const MODELO_FISH = "s2.1-pro"; // trocado de "s1" — mesmo preço, modelo topo de linha
 const FONTE_HEADLINE = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
+
+// ---------- Dicionário de correção de pronúncia ----------
+// O Fish Audio não suporta SSML/fonemas, então a correção é reescrever a palavra
+// de um jeito que force a pronúncia certa em português. Vá expandindo esta lista
+// conforme surgirem novas palavras problemáticas em produtos futuros.
+const DICIONARIO_PRONUNCIA = {
+  "shopee": "chopí",
+  "escova": "escóva", // força o acento na sílaba certa (es-CÓ-va)
+};
+
+function corrigirPronuncia(texto) {
+  let corrigido = texto;
+  for (const [errada, certa] of Object.entries(DICIONARIO_PRONUNCIA)) {
+    const regex = new RegExp(`\\b${errada}\\b`, "gi");
+    corrigido = corrigido.replace(regex, (match) => {
+      // preserva a capitalização original (maiúscula no início, etc.)
+      if (match[0] === match[0].toUpperCase()) {
+        return certa.charAt(0).toUpperCase() + certa.slice(1);
+      }
+      return certa;
+    });
+  }
+  return corrigido;
+}
 
 // ---------- Helpers ----------
 
@@ -76,14 +101,22 @@ Responda APENAS com um JSON válido, sem markdown, no formato exato abaixo:
 
 {
   "description": "descrição completa do vídeo",
-  "headline": "chamada curta para sobrepor no vídeo (máx 8 palavras)",
+  "headline": "chamada curta e IMPACTANTE para sobrepor no vídeo (máx 10 palavras)",
   "cta_keyword": "uma única palavra ou expressão bem curta relacionada ao produto, simples de digitar em um comentário",
   "cenas": [
     { "inicio_seg": 0, "fim_seg": 4.5, "narracao": "texto de narração SÓ para esse trecho, calibrado para caber em (fim_seg - inicio_seg) segundos, ~2,5 palavras/segundo" }
   ]
 }
 
-REGRAS:
+REGRAS PARA A HEADLINE — siga rigorosamente este estilo (curiosidade, benefício direto, um pouco de humor/exagero, às vezes com um parêntese de reforço no final):
+- "A máquina que limpa sozinha (e ainda te poupa a coluna)"
+- "Essa sapateira é a cara da riqueza com preço de Shopee"
+- "Barbeador que deixa pele de neném"
+- "O spray que recupera farol amarelado"
+- "Adeus sofrimento para tirar cravos"
+NÃO use headlines genéricas do tipo "Limpe tudo sem esforço com essa escova" — prefira sempre o ângulo de curiosidade/benefício acima.
+
+REGRAS PARA AS CENAS:
 - Identifique os cortes de cena reais (mudança de plano/ângulo) e use timestamps em segundos.
 - A ÚLTIMA cena deve terminar EXATAMENTE com: Comente "CTA_KEYWORD" que eu te envio o link — usando o valor de cta_keyword.
 `.trim();
@@ -102,10 +135,11 @@ REGRAS:
 // ---------- Etapa 2: Fish Audio gera a narração de cada cena ----------
 
 async function gerarAudioCena(texto, voiceId, outPath) {
+  const textoCorrigido = corrigirPronuncia(texto);
   const resp = await fetch("https://api.fish.audio/v1/tts", {
     method: "POST",
     headers: { Authorization: `Bearer ${FISH_API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ text: texto, reference_id: voiceId, format: "mp3", model: "s1" }),
+    body: JSON.stringify({ text: textoCorrigido, reference_id: voiceId, format: "mp3", model: MODELO_FISH }),
   });
   if (!resp.ok) throw new Error(`Fish Audio falhou: ${await resp.text()}`);
   fs.writeFileSync(outPath, Buffer.from(await resp.arrayBuffer()));
@@ -130,12 +164,14 @@ function montarVideoFinal({ videoPath, watermarkPath, audiosPaths, cenas, headli
 
   const fontsizeHeadline = 34;
   const larguraVideoPx = larguraVideo(videoPath);
-  const maxChars = Math.floor((larguraVideoPx * 0.85) / (fontsizeHeadline * 0.55));
+  // Fator aumentado — o negrito (DejaVuSans-Bold) ocupa mais espaço do que a estimativa anterior previa
+  const FATOR_LARGURA_CHAR = 0.66;
+  const maxChars = Math.floor((larguraVideoPx * 0.85) / (fontsizeHeadline * FATOR_LARGURA_CHAR));
   const linhas = quebrarTextoPorLargura(paraSentenceCase(headline), maxChars);
 
-  const boxY = 110, boxPadX = 16, boxPadY = 16, lineHeight = fontsizeHeadline + 12;
+  const boxY = 110, boxPadX = 26, boxPadY = 18, lineHeight = fontsizeHeadline + 12;
   const maiorLinha = Math.max(...linhas.map((l) => l.length));
-  const boxWidth = Math.min(larguraVideoPx * 0.92, maiorLinha * (fontsizeHeadline * 0.52) + boxPadX * 2);
+  const boxWidth = Math.min(larguraVideoPx * 0.94, maiorLinha * (fontsizeHeadline * FATOR_LARGURA_CHAR) + boxPadX * 2);
   const boxHeight = linhas.length * lineHeight + boxPadY * 1.2;
 
   const drawbox = `drawbox=x=(iw-${boxWidth.toFixed(0)})/2:y=${boxY}:w=${boxWidth.toFixed(0)}:h=${boxHeight.toFixed(0)}:color=white@1.0:t=fill`;
@@ -213,8 +249,6 @@ async function processarJob(job) {
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 }
-
-// ---------- Loop principal (agora com log a cada ciclo) ----------
 
 async function loopPrincipal() {
   console.log(`[${new Date().toISOString()}] Verificando fila...`);
