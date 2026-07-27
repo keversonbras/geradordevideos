@@ -5,3 +5,12 @@
     "@google/genai": "latest"
   }
 }
+
+{
+  "type": "module",
+  "dependencies": {
+    "@supabase/supabase-js": "^2",
+    "@google/genai": "latest",
+    "fontkit": "^2"
+  }
+}
