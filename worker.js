@@ -5,6 +5,7 @@ import fs from "fs";
 import path from "path";
 import os from "os";
 import { createRequire } from "module";
+
 const require = createRequire(import.meta.url);
 const fontkit = require("fontkit");
 
@@ -25,14 +26,13 @@ const FONTE_CARREGADA = fontkit.openSync(FONTE_HEADLINE);
 const FATOR_VELOCIDADE_MIN = 0.85;
 const FATOR_VELOCIDADE_MAX = 1.15;
 
-// ---------- Medição real de texto (substitui a estimativa por contagem de caracteres) ----------
+// ---------- Medição real de texto ----------
 
 function medirLarguraTexto(texto, fontsize) {
   const run = FONTE_CARREGADA.layout(texto);
   return (run.advanceWidth / FONTE_CARREGADA.unitsPerEm) * fontsize;
 }
 
-// Quebra o texto em linhas testando a largura REAL de cada linha (não contagem de caracteres)
 function quebrarTextoPorLarguraReal(texto, fontsize, larguraMaximaPx) {
   const palavras = texto.split(" ");
   const linhas = [];
@@ -48,6 +48,17 @@ function quebrarTextoPorLarguraReal(texto, fontsize, larguraMaximaPx) {
   }
   if (linhaAtual) linhas.push(linhaAtual);
   return linhas;
+}
+
+// Reduz a fonte progressivamente até o texto caber em no máximo 2 linhas
+function ajustarParaDuasLinhas(texto, larguraMaximaPx, fontsizeInicial, fontsizeMinimo = 20) {
+  let fontsize = fontsizeInicial;
+  let linhas = quebrarTextoPorLarguraReal(texto, fontsize, larguraMaximaPx);
+  while (linhas.length > 2 && fontsize > fontsizeMinimo) {
+    fontsize -= 2;
+    linhas = quebrarTextoPorLarguraReal(texto, fontsize, larguraMaximaPx);
+  }
+  return { fontsize, linhas };
 }
 
 // ---------- Dicionário de correção de pronúncia (vem do Supabase) ----------
@@ -214,14 +225,15 @@ function montarVideoFinal({ videoPath, watermarkPath, audiosPaths, cenas, headli
   const vConcat = infoCenas.map((_, i) => `[vseg${i}]`).join("");
   const aConcat = infoCenas.map((_, i) => `[aseg${i}]`).join("");
 
-  // Fonte proporcional à resolução do vídeo (antes era fixa em 34px, o que fazia
-  // parecer maior/menor dependendo da resolução de origem de cada vídeo)
-  const fontsizeHeadline = Math.round(clamp(larguraVideoPx * 0.052, 26, 46));
-
+  const fontsizeInicial = Math.round(clamp(larguraVideoPx * 0.052, 26, 46));
   const larguraMaximaTexto = larguraVideoPx * 0.85;
-  const linhas = quebrarTextoPorLarguraReal(paraSentenceCase(headline), fontsizeHeadline, larguraMaximaTexto);
 
-  // Largura real da linha mais larga, medida de verdade (não estimada)
+  const { fontsize: fontsizeHeadline, linhas } = ajustarParaDuasLinhas(
+    paraSentenceCase(headline),
+    larguraMaximaTexto,
+    fontsizeInicial
+  );
+
   const larguraMaiorLinha = Math.max(...linhas.map((l) => medirLarguraTexto(l, fontsizeHeadline)));
 
   const boxY = 110, boxPadX = 24, boxPadY = 18, lineHeight = fontsizeHeadline + 12;
