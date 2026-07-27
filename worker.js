@@ -23,9 +23,6 @@ const VELOCIDADE_VOZ = 1.1;
 const FONTE_HEADLINE = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
 const FONTE_CARREGADA = fontkit.openSync(FONTE_HEADLINE);
 
-const FATOR_VELOCIDADE_MIN = 0.85;
-const FATOR_VELOCIDADE_MAX = 1.15;
-
 // ---------- Medição real de texto ----------
 
 function medirLarguraTexto(texto, fontsize) {
@@ -50,7 +47,6 @@ function quebrarTextoPorLarguraReal(texto, fontsize, larguraMaximaPx) {
   return linhas;
 }
 
-// Reduz a fonte progressivamente até o texto caber em no máximo 2 linhas
 function ajustarParaDuasLinhas(texto, larguraMaximaPx, fontsizeInicial, fontsizeMinimo = 20) {
   let fontsize = fontsizeInicial;
   let linhas = quebrarTextoPorLarguraReal(texto, fontsize, larguraMaximaPx);
@@ -95,13 +91,6 @@ function corrigirPronuncia(texto, dicionario) {
 }
 
 // ---------- Helpers ----------
-
-function duracaoAudio(p) {
-  const saida = execSync(
-    `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${p}"`
-  ).toString().trim();
-  return parseFloat(saida);
-}
 
 function larguraVideo(p) {
   const saida = execSync(
@@ -191,39 +180,17 @@ async function gerarAudioCena(texto, voiceId, outPath, dicionario) {
   fs.writeFileSync(outPath, Buffer.from(await resp.arrayBuffer()));
 }
 
-// ---------- Etapa 3: FFmpeg monta o vídeo final ----------
+// ---------- Etapa 3: FFmpeg monta o vídeo final (vídeo original intocado) ----------
 
 function montarVideoFinal({ videoPath, watermarkPath, audiosPaths, cenas, headline, outPath }) {
-  const duracoesAudio = audiosPaths.map((p) => duracaoAudio(p));
   const larguraVideoPx = larguraVideo(videoPath);
 
-  const infoCenas = cenas.map((cena, i) => {
-    const duracaoVideoOriginal = cena.fim_seg - cena.inicio_seg;
-    const fatorIdeal = duracoesAudio[i] / duracaoVideoOriginal;
-    const fator = clamp(fatorIdeal, FATOR_VELOCIDADE_MIN, FATOR_VELOCIDADE_MAX);
-    const duracaoFinalCena = duracaoVideoOriginal * fator;
-    if (fatorIdeal !== fator) {
-      console.log(
-        `  Cena ${i + 1}: fator ideal ${fatorIdeal.toFixed(2)}x fora da faixa segura, limitado para ${fator.toFixed(2)}x`
-      );
-    }
-    return { ...cena, fator, duracaoFinalCena };
-  });
-
-  const trims = infoCenas
-    .map((cena, i) => `[0:v]trim=start=${cena.inicio_seg}:end=${cena.fim_seg},setpts=(PTS-STARTPTS)*${cena.fator}[vseg${i}]`)
-    .join(";");
-
-  const audioProcessado = infoCenas
-    .map((cena, i) => {
-      const dur = cena.duracaoFinalCena.toFixed(3);
-      return `[${i + 2}:a]atrim=0:${dur},apad=whole_dur=${dur}[aseg${i}]`;
-    })
+  const delays = cenas
+    .map((cena, i) => `[${i + 2}:a]adelay=${Math.round(cena.inicio_seg * 1000)}|${Math.round(cena.inicio_seg * 1000)}[a${i}]`)
     .join(";");
 
   const n = cenas.length;
-  const vConcat = infoCenas.map((_, i) => `[vseg${i}]`).join("");
-  const aConcat = infoCenas.map((_, i) => `[aseg${i}]`).join("");
+  const mixInputs = cenas.map((_, i) => `[a${i}]`).join("");
 
   const fontsizeInicial = Math.round(clamp(larguraVideoPx * 0.052, 26, 46));
   const larguraMaximaTexto = larguraVideoPx * 0.85;
@@ -249,12 +216,10 @@ function montarVideoFinal({ videoPath, watermarkPath, audiosPaths, cenas, headli
     .join(",");
 
   const filterComplex = [
-    trims,
-    audioProcessado,
-    `${vConcat}concat=n=${n}:v=1:a=0[vconcat]`,
-    `${aConcat}concat=n=${n}:v=0:a=1[aout]`,
+    delays,
+    `${mixInputs}amix=inputs=${n}:normalize=0[aout]`,
     `[1:v]scale=240:-1[wm]`,
-    `[vconcat][wm]overlay=(W-w)/2:H-h-30[vwm]`,
+    `[0:v][wm]overlay=(W-w)/2:H-h-30[vwm]`,
     `[vwm]${drawbox},${drawtexts}[vout]`,
   ].join(";");
 
