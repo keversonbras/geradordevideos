@@ -132,7 +132,7 @@ Responda APENAS com um JSON válido, sem markdown, no formato exato abaixo:
   "description": "descrição completa do vídeo",
   "headline": "chamada curta e IMPACTANTE para sobrepor no vídeo (máx 10 palavras)",
   "cta_keyword": "uma única palavra ou expressão bem curta relacionada ao produto, simples de digitar em um comentário",
-  "narracao": "texto de narração corrido para o vídeo inteiro, calibrado para caber na duração total do vídeo (~3,2 palavras por segundo), terminando exatamente com: Comente \\"CTA_KEYWORD\\" que eu te envio o link! (usando o valor de cta_keyword, sempre com exclamação no final)"
+  "narracao": "texto de narração corrido para o vídeo inteiro. Escreva o texto MAIS COMPLETO possível, com cadência de aproximadamente 3,6 palavras por segundo em relação à duração total do vídeo — é sempre preferível a narração ficar um pouco mais longa do que deixar silêncio sobrando no final. Termine EXATAMENTE com: Comenta CTA_KEYWORD que eu te envio o link! (usando o valor de cta_keyword SEM aspas ao redor da palavra, texto corrido, sempre com exclamação no final)"
 }
 
 REGRAS PARA A HEADLINE — siga rigorosamente este estilo (curiosidade, benefício direto, um pouco de humor/exagero). Varie a estrutura da frase a cada vídeo, não repita sempre o mesmo formato:
