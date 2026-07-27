@@ -4,6 +4,7 @@ import { execSync } from "child_process";
 import fs from "fs";
 import path from "path";
 import os from "os";
+import fontkit from "fontkit";
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
@@ -15,8 +16,37 @@ const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
 const MODELO_GEMINI = "gemini-flash-latest";
 const MODELO_FISH = "s2.1-pro";
-const VELOCIDADE_VOZ = 1.1; // prosody.speed do Fish Audio
+const VELOCIDADE_VOZ = 1.1;
 const FONTE_HEADLINE = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
+const FONTE_CARREGADA = fontkit.openSync(FONTE_HEADLINE);
+
+const FATOR_VELOCIDADE_MIN = 0.85;
+const FATOR_VELOCIDADE_MAX = 1.15;
+
+// ---------- Medição real de texto (substitui a estimativa por contagem de caracteres) ----------
+
+function medirLarguraTexto(texto, fontsize) {
+  const run = FONTE_CARREGADA.layout(texto);
+  return (run.advanceWidth / FONTE_CARREGADA.unitsPerEm) * fontsize;
+}
+
+// Quebra o texto em linhas testando a largura REAL de cada linha (não contagem de caracteres)
+function quebrarTextoPorLarguraReal(texto, fontsize, larguraMaximaPx) {
+  const palavras = texto.split(" ");
+  const linhas = [];
+  let linhaAtual = "";
+  for (const palavra of palavras) {
+    const tentativa = linhaAtual ? `${linhaAtual} ${palavra}` : palavra;
+    if (medirLarguraTexto(tentativa, fontsize) > larguraMaximaPx && linhaAtual) {
+      linhas.push(linhaAtual);
+      linhaAtual = palavra;
+    } else {
+      linhaAtual = tentativa;
+    }
+  }
+  if (linhaAtual) linhas.push(linhaAtual);
+  return linhas;
+}
 
 // ---------- Dicionário de correção de pronúncia (vem do Supabase) ----------
 
@@ -67,23 +97,6 @@ function larguraVideo(p) {
   return parseInt(saida, 10);
 }
 
-function quebrarTextoPorLargura(texto, maxCharsPorLinha) {
-  const palavras = texto.split(" ");
-  const linhas = [];
-  let linhaAtual = "";
-  for (const palavra of palavras) {
-    const tentativa = linhaAtual ? `${linhaAtual} ${palavra}` : palavra;
-    if (tentativa.length > maxCharsPorLinha && linhaAtual) {
-      linhas.push(linhaAtual);
-      linhaAtual = palavra;
-    } else {
-      linhaAtual = tentativa;
-    }
-  }
-  if (linhaAtual) linhas.push(linhaAtual);
-  return linhas;
-}
-
 function paraSentenceCase(texto) {
   const m = texto.toLowerCase();
   return m.charAt(0).toUpperCase() + m.slice(1);
@@ -91,6 +104,10 @@ function paraSentenceCase(texto) {
 
 function escaparParaDrawtext(texto) {
   return texto.replace(/'/g, "\\'").replace(/:/g, "\\:").replace(/,/g, "\\,");
+}
+
+function clamp(valor, min, max) {
+  return Math.min(Math.max(valor, min), max);
 }
 
 // ---------- Etapa 1: Gemini analisa e segmenta ----------
@@ -165,28 +182,48 @@ async function gerarAudioCena(texto, voiceId, outPath, dicionario) {
 
 function montarVideoFinal({ videoPath, watermarkPath, audiosPaths, cenas, headline, outPath }) {
   const duracoesAudio = audiosPaths.map((p) => duracaoAudio(p));
+  const larguraVideoPx = larguraVideo(videoPath);
 
-  const trims = cenas
+  const infoCenas = cenas.map((cena, i) => {
+    const duracaoVideoOriginal = cena.fim_seg - cena.inicio_seg;
+    const fatorIdeal = duracoesAudio[i] / duracaoVideoOriginal;
+    const fator = clamp(fatorIdeal, FATOR_VELOCIDADE_MIN, FATOR_VELOCIDADE_MAX);
+    const duracaoFinalCena = duracaoVideoOriginal * fator;
+    if (fatorIdeal !== fator) {
+      console.log(
+        `  Cena ${i + 1}: fator ideal ${fatorIdeal.toFixed(2)}x fora da faixa segura, limitado para ${fator.toFixed(2)}x`
+      );
+    }
+    return { ...cena, fator, duracaoFinalCena };
+  });
+
+  const trims = infoCenas
+    .map((cena, i) => `[0:v]trim=start=${cena.inicio_seg}:end=${cena.fim_seg},setpts=(PTS-STARTPTS)*${cena.fator}[vseg${i}]`)
+    .join(";");
+
+  const audioProcessado = infoCenas
     .map((cena, i) => {
-      const dur = cena.fim_seg - cena.inicio_seg;
-      const factor = duracoesAudio[i] / dur;
-      return `[0:v]trim=start=${cena.inicio_seg}:end=${cena.fim_seg},setpts=(PTS-STARTPTS)*${factor}[vseg${i}]`;
+      const dur = cena.duracaoFinalCena.toFixed(3);
+      return `[${i + 2}:a]atrim=0:${dur},apad=whole_dur=${dur}[aseg${i}]`;
     })
     .join(";");
 
   const n = cenas.length;
-  const vConcat = cenas.map((_, i) => `[vseg${i}]`).join("");
-  const aConcat = cenas.map((_, i) => `[${i + 2}:a]`).join("");
+  const vConcat = infoCenas.map((_, i) => `[vseg${i}]`).join("");
+  const aConcat = infoCenas.map((_, i) => `[aseg${i}]`).join("");
 
-  const fontsizeHeadline = 34;
-  const larguraVideoPx = larguraVideo(videoPath);
-  const FATOR_LARGURA_CHAR = 0.66;
-  const maxChars = Math.floor((larguraVideoPx * 0.85) / (fontsizeHeadline * FATOR_LARGURA_CHAR));
-  const linhas = quebrarTextoPorLargura(paraSentenceCase(headline), maxChars);
+  // Fonte proporcional à resolução do vídeo (antes era fixa em 34px, o que fazia
+  // parecer maior/menor dependendo da resolução de origem de cada vídeo)
+  const fontsizeHeadline = Math.round(clamp(larguraVideoPx * 0.052, 26, 46));
 
-  const boxY = 110, boxPadX = 26, boxPadY = 18, lineHeight = fontsizeHeadline + 12;
-  const maiorLinha = Math.max(...linhas.map((l) => l.length));
-  const boxWidth = Math.min(larguraVideoPx * 0.94, maiorLinha * (fontsizeHeadline * FATOR_LARGURA_CHAR) + boxPadX * 2);
+  const larguraMaximaTexto = larguraVideoPx * 0.85;
+  const linhas = quebrarTextoPorLarguraReal(paraSentenceCase(headline), fontsizeHeadline, larguraMaximaTexto);
+
+  // Largura real da linha mais larga, medida de verdade (não estimada)
+  const larguraMaiorLinha = Math.max(...linhas.map((l) => medirLarguraTexto(l, fontsizeHeadline)));
+
+  const boxY = 110, boxPadX = 24, boxPadY = 18, lineHeight = fontsizeHeadline + 12;
+  const boxWidth = Math.min(larguraVideoPx * 0.94, larguraMaiorLinha + boxPadX * 2);
   const boxHeight = linhas.length * lineHeight + boxPadY * 1.2;
 
   const drawbox = `drawbox=x=(iw-${boxWidth.toFixed(0)})/2:y=${boxY}:w=${boxWidth.toFixed(0)}:h=${boxHeight.toFixed(0)}:color=white@1.0:t=fill`;
@@ -199,6 +236,7 @@ function montarVideoFinal({ videoPath, watermarkPath, audiosPaths, cenas, headli
 
   const filterComplex = [
     trims,
+    audioProcessado,
     `${vConcat}concat=n=${n}:v=1:a=0[vconcat]`,
     `${aConcat}concat=n=${n}:v=0:a=1[aout]`,
     `[1:v]scale=240:-1[wm]`,
