@@ -112,7 +112,7 @@ function clamp(valor, min, max) {
   return Math.min(Math.max(valor, min), max);
 }
 
-// ---------- Etapa 1: Gemini analisa e segmenta ----------
+// ---------- Etapa 1: Gemini analisa o vídeo e gera narração única ----------
 
 async function analisarVideo(videoPath) {
   const uploaded = await ai.files.upload({ file: videoPath, config: { mimeType: "video/mp4" } });
@@ -124,7 +124,7 @@ async function analisarVideo(videoPath) {
   if (file.state === "FAILED") throw new Error("Gemini falhou ao processar o vídeo");
 
   const prompt = `
-Analise este vídeo de produto com atenção aos CORTES DE CENA (mudanças de plano/ângulo/cena).
+Analise este vídeo de produto.
 
 Responda APENAS com um JSON válido, sem markdown, no formato exato abaixo:
 
@@ -132,9 +132,7 @@ Responda APENAS com um JSON válido, sem markdown, no formato exato abaixo:
   "description": "descrição completa do vídeo",
   "headline": "chamada curta e IMPACTANTE para sobrepor no vídeo (máx 10 palavras)",
   "cta_keyword": "uma única palavra ou expressão bem curta relacionada ao produto, simples de digitar em um comentário",
-  "cenas": [
-    { "inicio_seg": 0, "fim_seg": 4.5, "narracao": "texto de narração SÓ para esse trecho" }
-  ]
+  "narracao": "texto de narração corrido para o vídeo inteiro, calibrado para caber na duração total do vídeo (~3,2 palavras por segundo), terminando exatamente com: Comente \\"CTA_KEYWORD\\" que eu te envio o link! (usando o valor de cta_keyword, sempre com exclamação no final)"
 }
 
 REGRAS PARA A HEADLINE — siga rigorosamente este estilo (curiosidade, benefício direto, um pouco de humor/exagero). Varie a estrutura da frase a cada vídeo, não repita sempre o mesmo formato:
@@ -143,11 +141,6 @@ REGRAS PARA A HEADLINE — siga rigorosamente este estilo (curiosidade, benefíc
 - "O spray que recupera farol amarelado"
 - "Adeus sofrimento para tirar cravos"
 NÃO use headlines genéricas do tipo "Limpe tudo sem esforço com essa escova" — prefira sempre o ângulo de curiosidade/benefício acima.
-
-REGRAS PARA AS NARRAÇÕES DAS CENAS:
-- Calibre cada narração de cena para caber em (fim_seg - inicio_seg) segundos usando uma cadência de aproximadamente 3,2 palavras por segundo. Escreva o texto mais completo possível dentro desse limite — é melhor a narração ficar um pouco mais longa do que curta demais.
-- Identifique os cortes de cena reais (mudança de plano/ângulo) e use timestamps em segundos.
-- A ÚLTIMA cena deve terminar EXATAMENTE com: Comente "CTA_KEYWORD" que eu te envio o link! — usando o valor de cta_keyword, sempre com ponto de exclamação no final.
 `.trim();
 
   const response = await ai.models.generateContent({
@@ -161,9 +154,9 @@ REGRAS PARA AS NARRAÇÕES DAS CENAS:
   return JSON.parse(limpo);
 }
 
-// ---------- Etapa 2: Fish Audio gera a narração de cada cena ----------
+// ---------- Etapa 2: Fish Audio gera a narração única ----------
 
-async function gerarAudioCena(texto, voiceId, outPath, dicionario) {
+async function gerarAudioNarracao(texto, voiceId, outPath, dicionario) {
   const textoCorrigido = corrigirPronuncia(texto, dicionario);
   const resp = await fetch("https://api.fish.audio/v1/tts", {
     method: "POST",
@@ -180,17 +173,17 @@ async function gerarAudioCena(texto, voiceId, outPath, dicionario) {
   fs.writeFileSync(outPath, Buffer.from(await resp.arrayBuffer()));
 }
 
+// ---------- Etapa 2b: remove silêncios internos longos do áudio ----------
+
+function removerSilencios(inputPath, outputPath) {
+  const cmd = `ffmpeg -y -i "${inputPath}" -af "silenceremove=stop_periods=-1:stop_duration=0.4:stop_threshold=-45dB" -c:a mp3 "${outputPath}"`;
+  execSync(cmd, { stdio: "inherit" });
+}
+
 // ---------- Etapa 3: FFmpeg monta o vídeo final (vídeo original intocado) ----------
 
-function montarVideoFinal({ videoPath, watermarkPath, audiosPaths, cenas, headline, outPath }) {
+function montarVideoFinal({ videoPath, watermarkPath, audioPath, headline, outPath }) {
   const larguraVideoPx = larguraVideo(videoPath);
-
-  const delays = cenas
-    .map((cena, i) => `[${i + 2}:a]adelay=${Math.round(cena.inicio_seg * 1000)}|${Math.round(cena.inicio_seg * 1000)}[a${i}]`)
-    .join(";");
-
-  const n = cenas.length;
-  const mixInputs = cenas.map((_, i) => `[a${i}]`).join("");
 
   const fontsizeInicial = Math.round(clamp(larguraVideoPx * 0.052, 26, 46));
   const larguraMaximaTexto = larguraVideoPx * 0.85;
@@ -216,15 +209,12 @@ function montarVideoFinal({ videoPath, watermarkPath, audiosPaths, cenas, headli
     .join(",");
 
   const filterComplex = [
-    delays,
-    `${mixInputs}amix=inputs=${n}:normalize=0[aout]`,
     `[1:v]scale=240:-1[wm]`,
     `[0:v][wm]overlay=(W-w)/2:H-h-30[vwm]`,
     `[vwm]${drawbox},${drawtexts}[vout]`,
   ].join(";");
 
-  const inputs = [`-i "${videoPath}"`, `-i "${watermarkPath}"`, ...audiosPaths.map((a) => `-i "${a}"`)];
-  const cmd = `ffmpeg -y ${inputs.join(" ")} -filter_complex "${filterComplex}" -map "[vout]" -map "[aout]" -c:v libx264 -c:a aac -shortest "${outPath}"`;
+  const cmd = `ffmpeg -y -i "${videoPath}" -i "${watermarkPath}" -i "${audioPath}" -filter_complex "${filterComplex}" -map "[vout]" -map 2:a -c:v libx264 -c:a aac -shortest "${outPath}"`;
   execSync(cmd, { stdio: "inherit" });
 }
 
@@ -250,20 +240,19 @@ async function processarJob(job) {
     await supabase.from("video_jobs").update({ status: "narrating", gemini_json: geminiJson }).eq("id", job.id);
     await supabase.from("job_events").insert({ job_id: job.id, etapa: "gemini_ok", payload: geminiJson });
 
-    const audiosPaths = [];
-    for (let i = 0; i < geminiJson.cenas.length; i++) {
-      const p = path.join(tmpDir, `cena_${i}.mp3`);
-      await gerarAudioCena(geminiJson.cenas[i].narracao, preset.voice_id, p, dicionarioPronuncia);
-      audiosPaths.push(p);
-    }
+    const audioBrutoPath = path.join(tmpDir, "narracao_bruta.mp3");
+    await gerarAudioNarracao(geminiJson.narracao, preset.voice_id, audioBrutoPath, dicionarioPronuncia);
+
+    const audioLimpoPath = path.join(tmpDir, "narracao.mp3");
+    removerSilencios(audioBrutoPath, audioLimpoPath);
+
     await supabase.from("video_jobs").update({ status: "rendering" }).eq("id", job.id);
 
     const outPath = path.join(tmpDir, "final.mp4");
     montarVideoFinal({
       videoPath,
       watermarkPath,
-      audiosPaths,
-      cenas: geminiJson.cenas,
+      audioPath: audioLimpoPath,
       headline: geminiJson.headline,
       outPath,
     });
