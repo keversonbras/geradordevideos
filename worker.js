@@ -4,7 +4,9 @@ import { execSync } from "child_process";
 import fs from "fs";
 import path from "path";
 import os from "os";
-import fontkit from "fontkit";
+import { createRequire } from "module";
+const require = createRequire(import.meta.url);
+const fontkit = require("fontkit");
 
 const SUPABASE_URL = process.env.SUPABASE_URL;
 const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_KEY;
