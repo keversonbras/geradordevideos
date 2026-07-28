@@ -19,9 +19,11 @@ const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
 const MODELO_GEMINI = "gemini-flash-latest";
 const MODELO_FISH = "s2.1-pro";
-const VELOCIDADE_VOZ = 1.1;
+const VELOCIDADE_VOZ = 1.1; // fixa — nunca sobe além disso
 const FONTE_HEADLINE = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
 const FONTE_CARREGADA = fontkit.openSync(FONTE_HEADLINE);
+const MAX_TENTATIVAS_NARRACAO = 3;
+const TOLERANCIA_SEGUNDOS = 0.4; // não regenera por diferenças mínimas
 
 // ---------- Medição real de texto ----------
 
@@ -92,6 +94,17 @@ function corrigirPronuncia(texto, dicionario) {
 
 // ---------- Helpers ----------
 
+function duracaoAudio(p) {
+  const saida = execSync(
+    `ffprobe -v error -show_entries format=duration -of default=noprint_wrappers=1:nokey=1 "${p}"`
+  ).toString().trim();
+  return parseFloat(saida);
+}
+
+function duracaoVideoTotal(p) {
+  return duracaoAudio(p); // mesma consulta serve pra qualquer arquivo com stream de tempo
+}
+
 function larguraVideo(p) {
   const saida = execSync(
     `ffprobe -v error -select_streams v:0 -show_entries stream=width -of default=noprint_wrappers=1:nokey=1 "${p}"`
@@ -132,7 +145,7 @@ Responda APENAS com um JSON válido, sem markdown, no formato exato abaixo:
   "description": "descrição completa do vídeo",
   "headline": "chamada curta e IMPACTANTE para sobrepor no vídeo (máx 10 palavras)",
   "cta_keyword": "uma única palavra ou expressão bem curta relacionada ao produto, simples de digitar em um comentário",
-  "narracao": "texto de narração corrido para o vídeo inteiro. Escreva o texto MAIS COMPLETO possível, com cadência de aproximadamente 3,4 palavras por segundo em relação à duração total do vídeo — é sempre preferível a narração ficar um pouco mais longa do que deixar silêncio sobrando no final. Termine EXATAMENTE com: Comenta CTA_KEYWORD que eu te envio o link! (usando o valor de cta_keyword SEM aspas ao redor da palavra, texto corrido, sempre com exclamação no final)"
+  "narracao": "texto de narração corrido para o vídeo inteiro, com cadência de aproximadamente 3,3 palavras por segundo em relação à duração total do vídeo. Termine EXATAMENTE com: Comenta CTA_KEYWORD que eu te envio o link! (usando o valor de cta_keyword SEM aspas ao redor da palavra, texto corrido, sempre com exclamação no final)"
 }
 
 REGRAS PARA A HEADLINE — siga rigorosamente este estilo (curiosidade, benefício direto, um pouco de humor/exagero). Varie a estrutura da frase a cada vídeo, não repita sempre o mesmo formato:
@@ -154,7 +167,30 @@ NÃO use headlines genéricas do tipo "Limpe tudo sem esforço com essa escova" 
   return JSON.parse(limpo);
 }
 
-// ---------- Etapa 2: Fish Audio gera a narração única ----------
+// ---------- Encurta a narração se ela ultrapassar o vídeo ----------
+
+async function encurtarNarracao(textoAtual, segundosExcedentes, ctaKeyword) {
+  const palavrasParaRemover = Math.ceil(segundosExcedentes * 3.3);
+  const prompt = `
+O texto de narração abaixo ficou aproximadamente ${segundosExcedentes.toFixed(1)} segundos mais longo do que o vídeo permite (~${palavrasParaRemover} palavras a mais que o necessário).
+
+Reescreva mantendo o mesmo sentido e o mesmo gancho, mas mais curto — remova palavras/frases redundantes, sem perder informação essencial do produto. Mantenha EXATAMENTE o mesmo final: "Comenta ${ctaKeyword} que eu te envio o link!" (sem aspas ao redor da palavra).
+
+Retorne APENAS o novo texto de narração, sem JSON, sem aspas envolvendo o texto todo, sem comentários.
+
+Texto atual:
+${textoAtual}
+`.trim();
+
+  const response = await ai.models.generateContent({
+    model: MODELO_GEMINI,
+    contents: [{ role: "user", parts: [{ text: prompt }] }],
+  });
+
+  return response.text.trim();
+}
+
+// ---------- Etapa 2: Fish Audio gera a narração ----------
 
 async function gerarAudioNarracao(texto, voiceId, outPath, dicionario) {
   const textoCorrigido = corrigirPronuncia(texto, dicionario);
@@ -173,11 +209,42 @@ async function gerarAudioNarracao(texto, voiceId, outPath, dicionario) {
   fs.writeFileSync(outPath, Buffer.from(await resp.arrayBuffer()));
 }
 
-// ---------- Etapa 2b: remove silêncios internos longos do áudio ----------
-
 function removerSilencios(inputPath, outputPath) {
   const cmd = `ffmpeg -y -i "${inputPath}" -af "silenceremove=stop_periods=-1:stop_duration=0.4:stop_threshold=-45dB" -c:a mp3 "${outputPath}"`;
   execSync(cmd, { stdio: "inherit" });
+}
+
+// ---------- Gera áudio, mede, e regenera mais curto se necessário ----------
+
+async function gerarNarracaoComAjuste(narracaoInicial, ctaKeyword, videoDuracao, voiceId, tmpDir, dicionario) {
+  let textoAtual = narracaoInicial;
+
+  for (let tentativa = 1; tentativa <= MAX_TENTATIVAS_NARRACAO; tentativa++) {
+    const brutoPath = path.join(tmpDir, `narracao_bruta_${tentativa}.mp3`);
+    const limpoPath = path.join(tmpDir, `narracao_${tentativa}.mp3`);
+
+    await gerarAudioNarracao(textoAtual, voiceId, brutoPath, dicionario);
+    removerSilencios(brutoPath, limpoPath);
+
+    const duracaoReal = duracaoAudio(limpoPath);
+    const excedente = duracaoReal - videoDuracao;
+
+    console.log(
+      `  Tentativa ${tentativa}: áudio ${duracaoReal.toFixed(1)}s vs vídeo ${videoDuracao.toFixed(1)}s (excedente: ${excedente.toFixed(1)}s)`
+    );
+
+    if (excedente <= TOLERANCIA_SEGUNDOS) {
+      return { audioPath: limpoPath, textoFinal: textoAtual };
+    }
+
+    if (tentativa < MAX_TENTATIVAS_NARRACAO) {
+      console.log(`  Narração longa demais, pedindo ao Gemini pra encurtar...`);
+      textoAtual = await encurtarNarracao(textoAtual, excedente, ctaKeyword);
+    } else {
+      console.log(`  Limite de tentativas atingido, usando o último áudio gerado mesmo assim.`);
+      return { audioPath: limpoPath, textoFinal: textoAtual };
+    }
+  }
 }
 
 // ---------- Etapa 3: FFmpeg monta o vídeo final (vídeo original intocado) ----------
@@ -240,19 +307,25 @@ async function processarJob(job) {
     await supabase.from("video_jobs").update({ status: "narrating", gemini_json: geminiJson }).eq("id", job.id);
     await supabase.from("job_events").insert({ job_id: job.id, etapa: "gemini_ok", payload: geminiJson });
 
-    const audioBrutoPath = path.join(tmpDir, "narracao_bruta.mp3");
-    await gerarAudioNarracao(geminiJson.narracao, preset.voice_id, audioBrutoPath, dicionarioPronuncia);
+    const videoDuracao = duracaoVideoTotal(videoPath);
+    const { audioPath, textoFinal } = await gerarNarracaoComAjuste(
+      geminiJson.narracao,
+      geminiJson.cta_keyword,
+      videoDuracao,
+      preset.voice_id,
+      tmpDir,
+      dicionarioPronuncia
+    );
 
-    const audioLimpoPath = path.join(tmpDir, "narracao.mp3");
-    removerSilencios(audioBrutoPath, audioLimpoPath);
-
-    await supabase.from("video_jobs").update({ status: "rendering" }).eq("id", job.id);
+    // Atualiza o gemini_json com o texto final usado (caso tenha sido encurtado)
+    const geminiJsonFinal = { ...geminiJson, narracao: textoFinal };
+    await supabase.from("video_jobs").update({ status: "rendering", gemini_json: geminiJsonFinal }).eq("id", job.id);
 
     const outPath = path.join(tmpDir, "final.mp4");
     montarVideoFinal({
       videoPath,
       watermarkPath,
-      audioPath: audioLimpoPath,
+      audioPath,
       headline: geminiJson.headline,
       outPath,
     });
