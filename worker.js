@@ -308,10 +308,10 @@ function montarVideoFinal({ videoPath, watermarkPath, avatarPath, audioPath, hea
   let indiceProximoInput = 2;
   let indiceAudio;
 
-  if (avatarPath) {
+if (avatarPath) {
     inputsExtras.push(`-stream_loop -1 -i "${avatarPath}"`);
-    filtros.push(`[${indiceProximoInput}:v]chromakey=${COR_CHROMA}:0.3:0.2,scale=220:-1[avt]`);
-    filtros.push(`${ultimaCamada}[avt]overlay=20:H-h-20[vwm2]`);
+    filtros.push(`[${indiceProximoInput}:v]chromakey=${COR_CHROMA}:0.12:0.04,scale=440:-1[avt]`);
+    filtros.push(`${ultimaCamada}[avt]overlay=20:H-h-20:shortest=1[vwm2]`);
     ultimaCamada = "[vwm2]";
     indiceAudio = indiceProximoInput + 1;
   } else {
