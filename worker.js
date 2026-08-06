@@ -19,11 +19,14 @@ const ai = new GoogleGenAI({ apiKey: GEMINI_API_KEY });
 
 const MODELO_GEMINI = "gemini-flash-latest";
 const MODELO_FISH = "s2.1-pro";
-const VELOCIDADE_VOZ = 1.1; // fixa — nunca sobe além disso
+const VELOCIDADE_VOZ = 1.1;
 const FONTE_HEADLINE = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
 const FONTE_CARREGADA = fontkit.openSync(FONTE_HEADLINE);
 const MAX_TENTATIVAS_NARRACAO = 3;
-const TOLERANCIA_SEGUNDOS = 0.4; // não regenera por diferenças mínimas
+const TOLERANCIA_SEGUNDOS = 0.4;
+
+const INSTRUCOES_ESTILO_PADRAO =
+  "Escreva a narração com tom de curiosidade e benefício direto, com um pouco de humor/exagero.";
 
 // ---------- Medição real de texto ----------
 
@@ -59,7 +62,7 @@ function ajustarParaDuasLinhas(texto, larguraMaximaPx, fontsizeInicial, fontsize
   return { fontsize, linhas };
 }
 
-// ---------- Dicionário de correção de pronúncia (vem do Supabase) ----------
+// ---------- Dicionário de correção de pronúncia ----------
 
 async function buscarDicionarioPronuncia() {
   const { data, error } = await supabase
@@ -92,6 +95,22 @@ function corrigirPronuncia(texto, dicionario) {
   return corrigido;
 }
 
+// ---------- Busca as instruções do estilo de narração escolhido ----------
+
+async function buscarInstrucoesEstilo(estiloId) {
+  if (!estiloId) return INSTRUCOES_ESTILO_PADRAO;
+  const { data, error } = await supabase
+    .from("estilos_narracao")
+    .select("instrucoes")
+    .eq("id", estiloId)
+    .single();
+  if (error || !data) {
+    console.error("Erro ao buscar estilo de narração, usando padrão:", error?.message);
+    return INSTRUCOES_ESTILO_PADRAO;
+  }
+  return data.instrucoes;
+}
+
 // ---------- Helpers ----------
 
 function duracaoAudio(p) {
@@ -102,7 +121,7 @@ function duracaoAudio(p) {
 }
 
 function duracaoVideoTotal(p) {
-  return duracaoAudio(p); // mesma consulta serve pra qualquer arquivo com stream de tempo
+  return duracaoAudio(p);
 }
 
 function larguraVideo(p) {
@@ -125,9 +144,9 @@ function clamp(valor, min, max) {
   return Math.min(Math.max(valor, min), max);
 }
 
-// ---------- Etapa 1: Gemini analisa o vídeo e gera narração única ----------
+// ---------- Etapa 1: Gemini analisa o vídeo e gera narração ----------
 
-async function analisarVideo(videoPath) {
+async function analisarVideo(videoPath, instrucoesEstilo) {
   const uploaded = await ai.files.upload({ file: videoPath, config: { mimeType: "video/mp4" } });
   let file = uploaded;
   while (file.state === "PROCESSING") {
@@ -145,8 +164,14 @@ Responda APENAS com um JSON válido, sem markdown, no formato exato abaixo:
   "description": "descrição completa do vídeo",
   "headline": "chamada curta e IMPACTANTE para sobrepor no vídeo (máx 10 palavras)",
   "cta_keyword": "uma única palavra ou expressão bem curta relacionada ao produto, simples de digitar em um comentário",
-  "narracao": "texto de narração corrido para o vídeo inteiro, com cadência de aproximadamente 3,5 palavras por segundo em relação à duração total do vídeo. Termine EXATAMENTE com: Comenta CTA_KEYWORD que eu te envio o link! (usando o valor de cta_keyword SEM aspas ao redor da palavra, texto corrido, sempre com exclamação no final)"
+  "narracao": "texto de narração — siga as instruções de estilo abaixo"
 }
+
+REGRA OBRIGATÓRIA DE DURAÇÃO (vale para qualquer estilo escolhido):
+Calibre o texto de narração para caber na duração TOTAL do vídeo, usando uma cadência de aproximadamente 3,3 palavras por segundo. O comprimento do texto deve ser sempre PROPORCIONAL à duração do vídeo — nunca um número fixo de palavras. Vídeos mais longos precisam de narração mais longa; vídeos curtos precisam de narração mais curta. Termine SEMPRE com: Comenta CTA_KEYWORD que eu te envio o link! (usando o valor de cta_keyword SEM aspas ao redor da palavra, texto corrido, sempre com exclamação no final).
+
+INSTRUÇÕES DE ESTILO (tom e estrutura do texto — não determina o tamanho, que já é definido pela regra acima):
+${instrucoesEstilo}
 
 REGRAS PARA A HEADLINE — siga rigorosamente este estilo (curiosidade, benefício direto, um pouco de humor/exagero). Varie a estrutura da frase a cada vídeo, não repita sempre o mesmo formato:
 - "Essa sapateira é a cara da riqueza com preço de Shopee"
@@ -174,7 +199,7 @@ async function encurtarNarracao(textoAtual, segundosExcedentes, ctaKeyword) {
   const prompt = `
 O texto de narração abaixo ficou aproximadamente ${segundosExcedentes.toFixed(1)} segundos mais longo do que o vídeo permite (~${palavrasParaRemover} palavras a mais que o necessário).
 
-Reescreva mantendo o mesmo sentido e o mesmo gancho, mas mais curto — remova palavras/frases redundantes, sem perder informação essencial do produto. Mantenha EXATAMENTE o mesmo final: "Comenta ${ctaKeyword} que eu te envio o link!" (sem aspas ao redor da palavra).
+Reescreva mantendo o mesmo sentido, tom e estrutura, mas mais curto — remova palavras/frases redundantes, sem perder informação essencial do produto. Mantenha EXATAMENTE o mesmo final: "Comenta ${ctaKeyword} que eu te envio o link!" (sem aspas ao redor da palavra).
 
 Retorne APENAS o novo texto de narração, sem JSON, sem aspas envolvendo o texto todo, sem comentários.
 
@@ -294,6 +319,7 @@ async function processarJob(job) {
 
     const { data: preset } = await supabase.from("brand_presets").select("*").eq("id", job.preset_id).single();
     const dicionarioPronuncia = await buscarDicionarioPronuncia();
+    const instrucoesEstilo = await buscarInstrucoesEstilo(job.estilo_narracao_id);
 
     const videoPath = path.join(tmpDir, "original.mp4");
     const { data: videoBlob } = await supabase.storage.from("videos-originais").download(job.video_original_path);
@@ -303,7 +329,7 @@ async function processarJob(job) {
     const { data: wmBlob } = await supabase.storage.from("marcas-dagua").download(preset.watermark_path);
     fs.writeFileSync(watermarkPath, Buffer.from(await wmBlob.arrayBuffer()));
 
-    const geminiJson = await analisarVideo(videoPath);
+    const geminiJson = await analisarVideo(videoPath, instrucoesEstilo);
     await supabase.from("video_jobs").update({ status: "narrating", gemini_json: geminiJson }).eq("id", job.id);
     await supabase.from("job_events").insert({ job_id: job.id, etapa: "gemini_ok", payload: geminiJson });
 
@@ -317,7 +343,6 @@ async function processarJob(job) {
       dicionarioPronuncia
     );
 
-    // Atualiza o gemini_json com o texto final usado (caso tenha sido encurtado)
     const geminiJsonFinal = { ...geminiJson, narracao: textoFinal };
     await supabase.from("video_jobs").update({ status: "rendering", gemini_json: geminiJsonFinal }).eq("id", job.id);
 
