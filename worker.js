@@ -169,7 +169,7 @@ Responda APENAS com um JSON válido, sem markdown, no formato exato abaixo:
 }
 
 REGRA OBRIGATÓRIA DE DURAÇÃO (vale para qualquer estilo escolhido):
-Calibre o texto de narração para caber na duração TOTAL do vídeo, usando uma cadência de aproximadamente 3,3 palavras por segundo. O comprimento do texto deve ser sempre PROPORCIONAL à duração do vídeo — nunca um número fixo de palavras. Vídeos mais longos precisam de narração mais longa; vídeos curtos precisam de narração mais curta. Termine SEMPRE com: Comenta CTA_KEYWORD que eu te envio o link! (usando o valor de cta_keyword SEM aspas ao redor da palavra, texto corrido, sempre com exclamação no final).
+Calibre o texto de narração para caber na duração TOTAL do vídeo, usando uma cadência de aproximadamente 3,4 palavras por segundo. O comprimento do texto deve ser sempre PROPORCIONAL à duração do vídeo — nunca um número fixo de palavras. Vídeos mais longos precisam de narração mais longa; vídeos curtos precisam de narração mais curta. Termine SEMPRE com: Comenta CTA_KEYWORD que eu te envio o link! (usando o valor de cta_keyword SEM aspas ao redor da palavra, texto corrido, sempre com exclamação no final).
 
 INSTRUÇÕES DE ESTILO (tom e estrutura do texto — não determina o tamanho, que já é definido pela regra acima):
 ${instrucoesEstilo}
@@ -196,7 +196,7 @@ NÃO use headlines genéricas do tipo "Limpe tudo sem esforço com essa escova" 
 // ---------- Encurta a narração se ela ultrapassar o vídeo ----------
 
 async function encurtarNarracao(textoAtual, segundosExcedentes, ctaKeyword) {
-  const palavrasParaRemover = Math.ceil(segundosExcedentes * 3.3);
+  const palavrasParaRemover = Math.ceil(segundosExcedentes * 3.4);
   const prompt = `
 O texto de narração abaixo ficou aproximadamente ${segundosExcedentes.toFixed(1)} segundos mais longo do que o vídeo permite (~${palavrasParaRemover} palavras a mais que o necessário).
 
@@ -301,22 +301,26 @@ function montarVideoFinal({ videoPath, watermarkPath, avatarPath, audioPath, hea
     })
     .join(",");
 
-  const filtros = [`[1:v]scale=240:-1[wm]`, `[0:v][wm]overlay=(W-w)/2:H-h-30[vwm1]`];
-
-  let ultimaCamada = "[vwm1]";
+  const filtros = [];
+  let ultimaCamada = "[0:v]";
   const inputsExtras = [];
-  let indiceProximoInput = 2;
+  let indiceProximoInput = 2; // 0 = vídeo original, 1 = marca d'água
   let indiceAudio;
 
-if (avatarPath) {
+  // Avatar primeiro (por baixo), marca d'água depois (por cima — pode cobrir parte do avatar)
+  if (avatarPath) {
     inputsExtras.push(`-stream_loop -1 -i "${avatarPath}"`);
     filtros.push(`[${indiceProximoInput}:v]chromakey=${COR_CHROMA}:0.15:0.05,despill=type=green,scale=350:-1[avt]`);
-    filtros.push(`${ultimaCamada}[avt]overlay=20:H-h+9:shortest=1[vwm2]`);
-    ultimaCamada = "[vwm2]";
+    filtros.push(`${ultimaCamada}[avt]overlay=20:H-h+9:shortest=1[vavt]`);
+    ultimaCamada = "[vavt]";
     indiceAudio = indiceProximoInput + 1;
   } else {
     indiceAudio = indiceProximoInput;
   }
+
+  filtros.push(`[1:v]scale=240:-1[wm]`);
+  filtros.push(`${ultimaCamada}[wm]overlay=(W-w)/2:H-h-30[vwm]`);
+  ultimaCamada = "[vwm]";
 
   filtros.push(`${ultimaCamada}${drawbox},${drawtexts}[vout]`);
   const filterComplex = filtros.join(";");
