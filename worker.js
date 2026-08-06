@@ -24,6 +24,7 @@ const FONTE_HEADLINE = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf";
 const FONTE_CARREGADA = fontkit.openSync(FONTE_HEADLINE);
 const MAX_TENTATIVAS_NARRACAO = 3;
 const TOLERANCIA_SEGUNDOS = 0.4;
+const COR_CHROMA = "0x00FF00";
 
 const INSTRUCOES_ESTILO_PADRAO =
   "Escreva a narração com tom de curiosidade e benefício direto, com um pouco de humor/exagero.";
@@ -272,9 +273,9 @@ async function gerarNarracaoComAjuste(narracaoInicial, ctaKeyword, videoDuracao,
   }
 }
 
-// ---------- Etapa 3: FFmpeg monta o vídeo final (vídeo original intocado) ----------
+// ---------- Etapa 3: FFmpeg monta o vídeo final ----------
 
-function montarVideoFinal({ videoPath, watermarkPath, audioPath, headline, outPath }) {
+function montarVideoFinal({ videoPath, watermarkPath, avatarPath, audioPath, headline, outPath }) {
   const larguraVideoPx = larguraVideo(videoPath);
 
   const fontsizeInicial = Math.round(clamp(larguraVideoPx * 0.052, 26, 46));
@@ -300,13 +301,27 @@ function montarVideoFinal({ videoPath, watermarkPath, audioPath, headline, outPa
     })
     .join(",");
 
-  const filterComplex = [
-    `[1:v]scale=240:-1[wm]`,
-    `[0:v][wm]overlay=(W-w)/2:H-h-30[vwm]`,
-    `[vwm]${drawbox},${drawtexts}[vout]`,
-  ].join(";");
+  const filtros = [`[1:v]scale=240:-1[wm]`, `[0:v][wm]overlay=(W-w)/2:H-h-30[vwm1]`];
 
-  const cmd = `ffmpeg -y -i "${videoPath}" -i "${watermarkPath}" -i "${audioPath}" -filter_complex "${filterComplex}" -map "[vout]" -map 2:a -c:v libx264 -c:a aac -shortest "${outPath}"`;
+  let ultimaCamada = "[vwm1]";
+  const inputsExtras = [];
+  let indiceProximoInput = 2;
+  let indiceAudio;
+
+  if (avatarPath) {
+    inputsExtras.push(`-stream_loop -1 -i "${avatarPath}"`);
+    filtros.push(`[${indiceProximoInput}:v]chromakey=${COR_CHROMA}:0.3:0.2,scale=220:-1[avt]`);
+    filtros.push(`${ultimaCamada}[avt]overlay=20:H-h-20[vwm2]`);
+    ultimaCamada = "[vwm2]";
+    indiceAudio = indiceProximoInput + 1;
+  } else {
+    indiceAudio = indiceProximoInput;
+  }
+
+  filtros.push(`${ultimaCamada}${drawbox},${drawtexts}[vout]`);
+  const filterComplex = filtros.join(";");
+
+  const cmd = `ffmpeg -y -i "${videoPath}" -i "${watermarkPath}" ${inputsExtras.join(" ")} -i "${audioPath}" -filter_complex "${filterComplex}" -map "[vout]" -map ${indiceAudio}:a -c:v libx264 -c:a aac -shortest "${outPath}"`;
   execSync(cmd, { stdio: "inherit" });
 }
 
@@ -329,6 +344,13 @@ async function processarJob(job) {
     const { data: wmBlob } = await supabase.storage.from("marcas-dagua").download(preset.watermark_path);
     fs.writeFileSync(watermarkPath, Buffer.from(await wmBlob.arrayBuffer()));
 
+    let avatarPath = null;
+    if (job.incluir_avatar && preset.avatar_path) {
+      avatarPath = path.join(tmpDir, "avatar.mp4");
+      const { data: avBlob } = await supabase.storage.from("avatares").download(preset.avatar_path);
+      fs.writeFileSync(avatarPath, Buffer.from(await avBlob.arrayBuffer()));
+    }
+
     const geminiJson = await analisarVideo(videoPath, instrucoesEstilo);
     await supabase.from("video_jobs").update({ status: "narrating", gemini_json: geminiJson }).eq("id", job.id);
     await supabase.from("job_events").insert({ job_id: job.id, etapa: "gemini_ok", payload: geminiJson });
@@ -350,6 +372,7 @@ async function processarJob(job) {
     montarVideoFinal({
       videoPath,
       watermarkPath,
+      avatarPath,
       audioPath,
       headline: geminiJson.headline,
       outPath,
