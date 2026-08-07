@@ -223,12 +223,14 @@ async function gerarAudioNarracao(texto, voiceId, outPath, dicionario) {
   const resp = await fetch("https://api.fish.audio/v1/tts", {
     method: "POST",
     headers: { Authorization: `Bearer ${FISH_API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify({
+   body: JSON.stringify({
       text: textoCorrigido,
       reference_id: voiceId,
       format: "mp3",
       model: MODELO_FISH,
       prosody: { speed: VELOCIDADE_VOZ, volume: 0 },
+      temperature: 0.3,
+      top_p: 0.3,
     }),
   });
   if (!resp.ok) throw new Error(`Fish Audio falhou: ${await resp.text()}`);
